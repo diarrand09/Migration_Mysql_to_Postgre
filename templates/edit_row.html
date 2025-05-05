@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modifier une ligne</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .container { margin-top: 50px; }
+        .form-card { border-radius: 1rem; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Accueil</a></li>
+                <li class="breadcrumb-item"><a href="{{ url_for('show_database', db_name=db_name) }}">{{ db_name }}</a></li>
+                <li class="breadcrumb-item"><a href="{{ url_for('show_table', db_name=db_name, table_name=table_name) }}">{{ table_name }}</a></li>
+                <li class="breadcrumb-item active">Modifier</li>
+            </ol>
+        </nav>
+        
+        <h1 class="mb-4">Modifier une ligne de {{ table_name }}</h1>
+        
+        <div class="card form-card">
+            <div class="card-body">
+                <form method="POST" action="{{ url_for('edit_row', db_name=db_name, table_name=table_name, row_id=row_id) }}">
+                    {% for column in columns_info %}
+                    <div class="mb-3">
+                        <label for="{{ column['Field'] }}" class="form-label">{{ column['Field'] }}</label>
+                        
+                        {% if column['Field'] in primary_keys %}
+                            <input type="text" class="form-control" id="{{ column['Field'] }}" name="{{ column['Field'] }}" 
+                                   value="{{ row_data[column['Field']] }}" readonly>
+                            <small class="text-muted">Clé primaire (non modifiable)</small>
+                        {% else %}
+                            {% if column['Type'].startswith('varchar') or column['Type'].startswith('char') 
+                                  or column['Type'].startswith('text') %}
+                                <input type="text" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}">
+                            {% elif column['Type'].startswith('int') or column['Type'].startswith('decimal') 
+                                  or column['Type'].startswith('float') or column['Type'].startswith('double') %}
+                                <input type="number" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}" 
+                                       step="{{ '0.01' if 'decimal' in column['Type'] or 'float' in column['Type'] 
+                                               or 'double' in column['Type'] else '1' }}">
+                            {% elif column['Type'].startswith('date') %}
+                                <input type="date" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}">
+                            {% elif column['Type'].startswith('datetime') or column['Type'].startswith('timestamp') %}
+                                <input type="datetime-local" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}">
+                            {% elif column['Type'].startswith('time') %}
+                                <input type="time" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}">
+                            {% elif column['Type'].startswith('enum') or column['Type'].startswith('set') %}
+                                {% set options = column['Type'].split('(')[1].split(')')[0].replace("'", "").split(',') %}
+                                <select class="form-select" id="{{ column['Field'] }}" name="{{ column['Field'] }}">
+                                    <option value="" {% if not row_data[column['Field']] %}selected{% endif %}>-- Sélectionner --</option>
+                                    {% for option in options %}
+                                    <option value="{{ option }}" {% if row_data[column['Field']] == option %}selected{% endif %}>
+                                        {{ option }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            {% elif column['Type'].startswith('tinyint(1)') %}
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="{{ column['Field'] }}" 
+                                           name="{{ column['Field'] }}" {% if row_data[column['Field']] %}checked{% endif %}>
+                                    <label class="form-check-label" for="{{ column['Field'] }}">
+                                        Activé
+                                    </label>
+                                </div>
+                            {% else %}
+                                <input type="text" class="form-control" id="{{ column['Field'] }}" 
+                                       name="{{ column['Field'] }}" value="{{ row_data[column['Field']] or '' }}">
+                            {% endif %}
+                            
+                            {% if column['Field'].startswith('id_') and column['Field'] not in primary_keys %}
+                                <small class="text-muted">Clé étrangère</small>
+                            {% endif %}
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                    
+                    <div class="d-flex justify-content-between">
+                        <a href="{{ url_for('show_table', db_name=db_name, table_name=table_name) }}" 
+                           class="btn btn-secondary">Annuler</a>
+                        <button type="submit" class="btn btn-primary">Enregistrer les modifications</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

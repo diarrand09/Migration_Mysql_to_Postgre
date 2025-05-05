@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Table: {{ table_name }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .container { margin-top: 50px; }
+        .row-transferred { background-color: #d1e7dd !important; }
+        .action-bar { margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; }
+        
+        /* Nouveaux styles pour améliorer l'affichage */
+        .edit-btn { margin-right: 5px; }
+        .update-btn { margin-left: 5px; }
+        .refresh-btn { margin-left: 10px; }
+        .btn-success-soft { background-color: #d1e7dd; color: #0f5132; border-color: #a3cfbb; }
+        .btn-success-soft:hover { background-color: #a3cfbb; color: #0f5132; }
+        .table-responsive { max-height: 70vh; overflow-y: auto; }
+        .sticky-header thead th { position: sticky; top: 0; background-color: #f8f9fa; z-index: 1; }
+        .loading-overlay { 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+            background-color: rgba(0,0,0,0.5); z-index: 1000; display: none;
+            justify-content: center; align-items: center; color: white;
+        }
+        .row-deleted { 
+            background-color: #f8d7da !important; /* Couleur rouge clair pour indiquer la suppression */
+            opacity: 0.7; /* Légère transparence */
+        }
+        .row-deleted button,
+        .row-deleted a {
+            pointer-events: none; /* Empêcher les interactions */
+            color: #6c757d; /* Couleur de texte grisée */}
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="spinner-border text-light me-3" role="status"></div>
+        <span>Traitement en cours...</span>
+    </div>
+
+    <div class="container">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Accueil</a></li>
+                <li class="breadcrumb-item"><a href="{{ url_for('show_database', db_name=db_name) }}">{{ db_name }}</a></li>
+                <li class="breadcrumb-item active">{{ table_name }}</li>
+            </ol>
+        </nav>
+        
+        <h1 class="mb-4">Données de la table {{ table_name }}</h1>
+        
+        <div class="action-bar d-flex justify-content-between align-items-center">
+            <div>
+                <button id="select-all" class="btn btn-outline-primary">Tout sélectionner</button>
+                <button id="deselect-all" class="btn btn-outline-secondary">Tout désélectionner</button>
+                <a href="{{ url_for('resume_session') }}" class="btn btn-outline-success refresh-btn">Reprendre session</a>
+                <a href="{{ url_for('transfer_status') }}" class="btn btn-outline-info ms-2">État des transferts</a>
+            </div>
+            <button id="transfer-selected" class="btn btn-warning">
+                Exporter vers PostgreSQL <span id="selected-count" class="badge bg-dark ms-2">0</span>
+            </button>
+        </div>
+        
+        <div class="table-responsive sticky-header">
+            <form id="transfer-form">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>
+                                <input type="checkbox" id="select-all-header" class="form-check-input">
+                            </th>
+                            {% for column in columns %}
+                            <th>{{ column }}</th>
+                            {% endfor %}
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in rows %}
+                        {% set row_id = row[columns[0]] %}
+                        {% if table_name == 'LIGNE_COMMANDE' %}
+                            {% set row_id = row['id_commande']|string + '_' + row['id_produit']|string %}
+                        {% endif %}
+                        <tr id="row-{{ row_id }}" class="data-row {% if row_id|string in mapped_rows %}row-transferred{% endif %}">
+                            <td>
+                                <input type="checkbox" name="selected_rows" value="{{ row_id }}" 
+                                    class="form-check-input row-checkbox" 
+                                    data-id="{{ row_id }}"
+                                    {% if row_id|string in mapped_rows %}disabled{% endif %}>
+                            </td>
+                            {% for column in columns %}
+                            <td>{{ row[column] }}</td>
+                            {% endfor %}
+                            <td>
+                                {% if row_id|string in mapped_rows %}
+                                <a href="{{ url_for('edit_row', db_name=db_name, table_name=table_name, row_id=row_id) }}" 
+                                   class="btn btn-outline-primary btn-sm edit-btn">
+                                    Modifier
+                                </a>
+                                <button type="button" class="btn btn-outline-info btn-sm update-btn" 
+                                        onclick="updateInPostgres('{{ row_id }}')">
+                                    Synchroniser
+                                </button>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </form>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('transfer-form');
+            const selectAllBtn = document.getElementById('select-all');
+            const deselectAllBtn = document.getElementById('deselect-all');
+            const selectAllHeader = document.getElementById('select-all-header');
+            const transferSelectedBtn = document.getElementById('transfer-selected');
+            const selectedCount = document.getElementById('selected-count');
+            const checkboxes = document.querySelectorAll('.row-checkbox');
+            const loadingOverlay = document.getElementById('loading-overlay');
+            
+            // Fonction pour montrer l'overlay de chargement
+            function showLoading() {
+                loadingOverlay.style.display = 'flex';
+            }
+            
+            // Fonction pour cacher l'overlay de chargement
+            function hideLoading() {
+                loadingOverlay.style.display = 'none';
+            }
+            
+            // Fonction pour mettre à jour le compteur de sélection
+            function updateSelectedCount() {
+                const count = document.querySelectorAll('.row-checkbox:checked').length;
+                selectedCount.textContent = count;
+                
+                // Désactiver le bouton de transfert si aucune ligne sélectionnée
+                transferSelectedBtn.disabled = count === 0;
+            }
+            
+            // Événement pour "Tout sélectionner"
+            selectAllBtn.addEventListener('click', function() {
+                checkboxes.forEach(checkbox => {
+                    if (!checkbox.disabled) {
+                        checkbox.checked = true;
+                    }
+                });
+                updateSelectedCount();
+            });
+            
+            // Événement pour "Tout désélectionner"
+            deselectAllBtn.addEventListener('click', function() {
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = false;
+                });
+                updateSelectedCount();
+            });
+            
+            // Événement pour la case à cocher dans l'en-tête
+            selectAllHeader.addEventListener('change', function() {
+                const isChecked = this.checked;
+                checkboxes.forEach(checkbox => {
+                    if (!checkbox.disabled) {
+                        checkbox.checked = isChecked;
+                    }
+                });
+                updateSelectedCount();
+            });
+            
+            // Événement pour chaque case à cocher de ligne
+            checkboxes.forEach(checkbox => {
+                checkbox.addEventListener('change', updateSelectedCount);
+            });
+            
+            // Événement pour le bouton "Exporter vers PostgreSQL"
+            transferSelectedBtn.addEventListener('click', function() {
+                const selectedRows = Array.from(document.querySelectorAll('.row-checkbox:checked'));
+                
+                if (selectedRows.length === 0) {
+                    alert('Veuillez sélectionner au moins une ligne à transférer.');
+                    return;
+                }
+                
+                // Montrer l'overlay de chargement
+                showLoading();
+                
+                // Désactiver le bouton pendant le transfert
+                this.disabled = true;
+                this.innerHTML = 'Transfert en cours...';
+                
+                // Tableau pour stocker les promesses de transfert
+                const transferPromises = [];
+                
+                // Pour chaque ligne sélectionnée
+                selectedRows.forEach(checkbox => {
+                    const rowId = checkbox.getAttribute('data-id');
+                    const idColumn = "{{ columns[0] }}";
+                    
+                    // Préparer les données pour le formulaire
+                    const formData = new FormData();
+                    formData.append('db_name', "{{ db_name }}");
+                    formData.append('table_name', "{{ table_name }}");
+                    formData.append('row_id', rowId);
+                    formData.append('id_column', idColumn);
+                    
+                    // Ajouter la promesse de transfert
+                    const promise = fetch('/transfer', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Marquer la ligne comme transférée
+                            const row = document.getElementById(`row-${rowId}`);
+                            row.classList.add('row-transferred');
+                            checkbox.checked = false;
+                            checkbox.disabled = true;
+                            
+                            // Ajouter les boutons d'édition et de synchronisation
+                            const actionsCell = row.querySelector('td:last-child');
+                            actionsCell.innerHTML = `
+                                <a href="{{ url_for('edit_row', db_name=db_name, table_name=table_name, row_id='') }}${rowId}" 
+                                   class="btn btn-outline-primary btn-sm edit-btn">
+                                    Modifier
+                                </a>
+                                <button type="button" class="btn btn-outline-info btn-sm update-btn" 
+                                        onclick="updateInPostgres('${rowId}')">
+                                    Synchroniser
+                                </button>
+                            `;
+                            
+                            return { id: rowId, success: true };
+                        } else {
+                            console.error('Erreur lors du transfert:', data.error);
+                            return { id: rowId, success: false, error: data.error };
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Erreur:', error);
+                        return { id: rowId, success: false, error: error.message };
+                    });
+                    
+                    transferPromises.push(promise);
+                });
+                
+                // Attendre que tous les transferts soient terminés
+                Promise.all(transferPromises)
+                    .then(results => {
+                        // Réactiver le bouton
+                        this.disabled = false;
+                        this.innerHTML = 'Exporter vers PostgreSQL <span class="badge bg-dark ms-2">0</span>';
+                        
+                        // Cacher l'overlay de chargement
+                        hideLoading();
+                        
+                        // Calculer les statistiques
+                        const successful = results.filter(r => r.success).length;
+                        const failed = results.length - successful;
+                        
+                        // Afficher un résumé
+                        if (failed > 0) {
+                            alert(`Transfert terminé: ${successful} réussi(s), ${failed} échec(s).`);
+                        } else {
+                            alert(`Transfert de ${successful} ligne(s) réussi!`);
+                        }
+                        
+                        // Mettre à jour le compteur
+                        updateSelectedCount();
+                    });
+            });
+            
+            // Initialiser le compteur
+            updateSelectedCount();
+        });
+        
+        // Fonction pour synchroniser une ligne dans PostgreSQL
+        function updateInPostgres(rowId) {
+            if (!confirm('Voulez-vous vraiment synchroniser cette ligne avec les données MySQL actuelles?')) {
+                return;
+            }
+            
+            // Montrer l'overlay de chargement
+            document.getElementById('loading-overlay').style.display = 'flex';
+            
+            // Préparer les données pour le formulaire
+            const formData = new FormData();
+            formData.append('db_name', "{{ db_name }}");
+            formData.append('table_name', "{{ table_name }}");
+            formData.append('row_id', rowId);
+            formData.append('id_column', "{{ columns[0] }}");
+            
+            // Appeler l'API de mise à jour
+            fetch('/update-in-postgres', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Cacher l'overlay de chargement
+                document.getElementById('loading-overlay').style.display = 'none';
+                
+                if (data.success) {
+                    alert('Données synchronisées avec succès!');
+                } else {
+                    alert(`Erreur lors de la synchronisation: ${data.error}`);
+                }
+            })
+            .catch(error => {
+                // Cacher l'overlay de chargement
+                document.getElementById('loading-overlay').style.display = 'none';
+                
+                console.error('Erreur:', error);
+                alert(`Erreur: ${error.message}`);
+            });
+        }
+        function deleteFromPostgres(rowId) {
+            if (!confirm('Êtes-vous sûr de vouloir supprimer cette ligne de PostgreSQL ?')) {
+                return;
+            }
+        
+            // Montrer l'overlay de chargement
+            document.getElementById('loading-overlay').style.display = 'flex';
+        
+            // Préparer les données pour le formulaire
+            const formData = new FormData();
+            formData.append('db_name', "{{ db_name }}");
+            formData.append('table_name', "{{ table_name }}");
+            formData.append('row_id', rowId);
+            formData.append('id_column', "{{ columns[0] }}");
+        
+            // Appeler l'API de suppression
+            fetch('/delete-from-postgres', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Cacher l'overlay de chargement
+                document.getElementById('loading-overlay').style.display = 'none';
+        
+                if (data.success) {
+                    alert(data.message);
+                    // Ajouter la classe "row-deleted" à la ligne au lieu de la supprimer
+                    const row = document.getElementById(`row-${data.deleted_row_id}`);
+                    row.classList.add('row-deleted');
+                    // Désactiver tous les boutons d'action de cette ligne
+                    const actionButtons = row.querySelectorAll('button, a');
+                    actionButtons.forEach(button => {
+                        button.disabled = true;
+                    });
+                } else {
+                    alert(`Erreur lors de la suppression: ${data.error}`);
+                }
+            })
+            .catch(error => {
+                // Cacher l'overlay de chargement
+                document.getElementById('loading-overlay').style.display = 'none';
+        
+                console.error('Erreur:', error);
+                alert(`Erreur: ${error.message}`);
+            });
+        }
+    </script>
+</body>
+</html>
