@@ -101,8 +101,7 @@ def check_and_reset_table(pg_cursor, table_name):
         primary_key_column = result[0]
         print(f"Colonne clé primaire détectée: {primary_key_column}")
 
-        # Toujours réinitialiser la séquence à 1, indépendamment du nombre d'entrées
-        # pour s'assurer que les IDs commencent toujours à 1
+        # Réinitialiser systématiquement la séquence à 1, peu importe l'état de la table
         pg_cursor.execute(f"SELECT pg_get_serial_sequence('{table_name.lower()}', '{primary_key_column}')")
         sequence_name = pg_cursor.fetchone()[0]
         
@@ -163,6 +162,33 @@ def clear_mapping_table(pg_cursor, db_name, table_name):
         raise
         
     return False
+@app.route('/reset-all-mappings', methods=['POST'])
+def reset_all_mappings():
+    pg_conn = None
+    pg_cursor = None
+    
+    try:
+        pg_conn = get_postgres_connection()
+        pg_cursor = pg_conn.cursor()
+        
+        # Réinitialiser toutes les tables de mapping
+        reset_all_mapping_tables(pg_cursor)
+        pg_conn.commit()
+        
+        return jsonify({"success": True, "message": "Toutes les tables de mapping ont été vidées et leurs séquences réinitialisées à 1"})
+    
+    except Exception as e:
+        if pg_conn:
+            try:
+                pg_conn.rollback()
+            except:
+                pass
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    
+    finally:
+        if pg_cursor: pg_cursor.close()
+        if pg_conn: pg_conn.close()
 
 # Créer ou récupérer une table de mapping
 def ensure_mapping_table_exists(pg_cursor, db_name, table_name):
@@ -192,6 +218,14 @@ def ensure_mapping_table_exists(pg_cursor, db_name, table_name):
                 )
             """)
             print(f"Table de mapping créée: {mapping_table}")
+        else:
+            # La table existe, vérifions si elle est vide
+            pg_cursor.execute(f"SELECT COUNT(*) FROM {mapping_table}")
+            count = pg_cursor.fetchone()[0]
+            if count == 0:
+                # Si la table est vide, réinitialisons la séquence
+                pg_cursor.execute(f"ALTER SEQUENCE {mapping_table}_id_seq RESTART WITH 1")
+                print(f"Séquence réinitialisée pour la table de mapping vide: {mapping_table}")
         
         return mapping_table
     
@@ -276,11 +310,27 @@ def reset_sequences():
         pg_conn = get_postgres_connection()
         pg_cursor = pg_conn.cursor()
         
-        # Réinitialiser toutes les séquences
+        # Réinitialiser toutes les séquences des tables principales
         reset_all_sequences(pg_cursor)
+        
+        # Réinitialiser aussi les séquences des tables de mapping
+        pg_cursor.execute("""
+            SELECT sequence_name
+            FROM information_schema.sequences
+            WHERE sequence_schema = 'public' AND sequence_name LIKE 'id_mapping_%_id_seq'
+        """)
+        mapping_sequences = pg_cursor.fetchall()
+        
+        for seq in mapping_sequences:
+            pg_cursor.execute(f"ALTER SEQUENCE {seq[0]} RESTART WITH 1")
+            print(f"Séquence de mapping {seq[0]} réinitialisée à 1")
+        
         pg_conn.commit()
         
-        return jsonify({"success": True, "message": "Toutes les séquences ont été réinitialisées à 1"})
+        return jsonify({
+            "success": True, 
+            "message": "Toutes les séquences (tables principales et tables de mapping) ont été réinitialisées à 1"
+        })
     
     except Exception as e:
         if pg_conn:
@@ -294,35 +344,52 @@ def reset_sequences():
     finally:
         if pg_cursor: pg_cursor.close()
         if pg_conn: pg_conn.close()
-
+def reset_all_mapping_tables(pg_cursor):
+    try:
+        # Récupérer toutes les tables de mapping
+        pg_cursor.execute("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_name LIKE 'id_mapping_%'
+        """)
+        mapping_tables = [table[0] for table in pg_cursor.fetchall()]
+        
+        for table in mapping_tables:
+            # Vider la table
+            pg_cursor.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY")
+            print(f"Table de mapping {table} vidée et séquence réinitialisée")
+        
+        return True
+    except Exception as e:
+        print(f"Erreur dans reset_all_mapping_tables: {e}")
+        raise
+        
+    return False
 # Nouveau point d'entrée pour vider une table de mapping
 @app.route('/clear-mapping/<db_name>/<table_name>', methods=['POST'])
-def clear_mapping(db_name, table_name):
-    pg_conn = None
-    pg_cursor = None
+def clear_mapping_table(pg_cursor, db_name, table_name):
+    mapping_table = f"id_mapping_{db_name.lower()}_{table_name.lower()}"
     
     try:
-        pg_conn = get_postgres_connection()
-        pg_cursor = pg_conn.cursor()
+        pg_cursor.execute(f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = %s
+            )
+        """, (mapping_table,))
+        exists = pg_cursor.fetchone()[0]
         
-        # Vider la table de mapping
-        clear_mapping_table(pg_cursor, db_name, table_name)
-        pg_conn.commit()
+        if exists:
+            # Utiliser RESTART IDENTITY pour réinitialiser la séquence en même temps
+            pg_cursor.execute(f"TRUNCATE TABLE {mapping_table} RESTART IDENTITY")
+            print(f"Table de mapping {mapping_table} vidée et séquence réinitialisée")
         
-        return jsonify({"success": True, "message": f"Table de mapping pour {db_name}.{table_name} vidée"})
-    
+        return True
     except Exception as e:
-        if pg_conn:
-            try:
-                pg_conn.rollback()
-            except:
-                pass
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-    
-    finally:
-        if pg_cursor: pg_cursor.close()
-        if pg_conn: pg_conn.close()
+        print(f"Erreur lors du nettoyage de la table de mapping: {e}")
+        raise
+        
+    return False
 
 @app.route('/')
 def index():
@@ -475,11 +542,7 @@ def transfer_row():
 
         pg_conn = get_postgres_connection()
         pg_cursor = pg_conn.cursor()
-
-        # Récupération des clés primaires
-        primary_keys = get_primary_keys(mysql_cursor, table_name)
-        is_composite_key_table = len(primary_keys) > 1
-
+        
         # Si réinitialisation demandée, vider la table de destination et réinitialiser les séquences
         if reset_sequence:
             # Vider la table PostgreSQL
@@ -492,7 +555,15 @@ def transfer_row():
             check_and_reset_table(pg_cursor, table_name)
         else:
             # Toujours vérifier et réinitialiser la table si elle est vide
-            check_and_reset_table(pg_cursor, table_name)
+            pg_cursor.execute(f"SELECT COUNT(*) FROM {table_name.lower()}")
+            row_count = pg_cursor.fetchone()[0]
+            if row_count == 0:
+                # Si la table est vide, on réinitialise la séquence à 1
+                check_and_reset_table(pg_cursor, table_name)
+
+        # Récupération des clés primaires
+        primary_keys = get_primary_keys(mysql_cursor, table_name)
+        is_composite_key_table = len(primary_keys) > 1
 
         # Cas spécial pour LIGNE_COMMANDE
         if table_name.upper() == 'LIGNE_COMMANDE':
@@ -507,7 +578,6 @@ def transfer_row():
                 """, (id_commande, id_produit))
             else:
                 # Si on a seulement l'id_commande (ce qui peut être le cas avec la sélection multiple)
-                # Prenons la première ligne correspondante
                 mysql_cursor.execute(f"""
                     SELECT * FROM `{table_name}` 
                     WHERE `id_commande` = %s
@@ -528,8 +598,17 @@ def transfer_row():
         placeholders = []
         values = []
         
+        # Vérifier si nous devrions omettre l'ID primaire pour laisser PostgreSQL générer un nouvel ID
+        # Cette modification permet d'éviter les conflits d'ID entre les différentes sources
+        omit_primary_key = True  # Par défaut, on laisse PostgreSQL générer un nouvel ID
+        
         for col_name, value in row_data.items():
             col_name_lower = col_name.lower()
+            
+            # Pour les tables à clé primaire simple, on exclut la colonne de la clé primaire
+            # pour laisser PostgreSQL générer automatiquement un nouvel ID
+            if omit_primary_key and table_name.upper() != 'LIGNE_COMMANDE' and col_name in primary_keys:
+                continue  # Sauter la clé primaire pour qu'elle soit auto-générée
             
             # Mapper les ID pour les clés étrangères
             if col_name.lower().startswith('id_'):
@@ -576,13 +655,22 @@ def transfer_row():
                 ON CONFLICT (table_name, old_id) DO UPDATE SET new_id = EXCLUDED.new_id
             """, (table_name.lower(), old_composite_id, new_composite_id))
         else:
-            # Cas standard pour les tables à clé primaire simple
+            # Déterminer l'index de la colonne clé primaire dans le résultat
+            pg_cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name.lower()}'")
+            pg_columns = [col[0] for col in pg_cursor.fetchall()]
+            
+            # Si la clé primaire est id_client, chercher sa position dans le résultat
+            pk_column = primary_keys[0].lower()
+            pk_index = pg_columns.index(pk_column) if pk_column in pg_columns else 0
+            
             pg_cursor.execute(f"""
                 INSERT INTO {mapping_table} (table_name, old_id, new_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (table_name, old_id) DO UPDATE SET new_id = EXCLUDED.new_id
-            """, (table_name.lower(), str(row_id), str(new_row[0])))
-
+            """, (table_name.lower(), str(row_id), str(new_row[pk_index])))
+            
+        # S'assurer que la séquence est correctement mise à jour
+        check_and_fix_sequence(pg_cursor, table_name)
         pg_conn.commit()
 
         return jsonify({"success": True, "message": "Données transférées avec succès"})
@@ -601,6 +689,46 @@ def transfer_row():
         if mysql_conn: mysql_conn.close()
         if pg_cursor: pg_cursor.close()
         if pg_conn: pg_conn.close()
+def check_and_fix_sequence(pg_cursor, table_name):
+    try:
+        # Récupérer la colonne clé primaire
+        pg_cursor.execute(f"""
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = '{table_name.lower()}'::regclass AND i.indisprimary;
+        """)
+        result = pg_cursor.fetchone()
+        
+        if not result:
+            return False
+            
+        primary_key_column = result[0]
+        
+        # Récupérer le nom de la séquence
+        pg_cursor.execute(f"SELECT pg_get_serial_sequence('{table_name.lower()}', '{primary_key_column}')")
+        sequence_name = pg_cursor.fetchone()[0]
+        
+        if not sequence_name:
+            return False
+            
+        # Récupérer la valeur actuelle de la séquence
+        pg_cursor.execute(f"SELECT last_value FROM {sequence_name}")
+        seq_value = pg_cursor.fetchone()[0]
+        
+        # Récupérer la valeur maximale dans la table
+        pg_cursor.execute(f"SELECT COALESCE(MAX(\"{primary_key_column}\"), 0) FROM {table_name.lower()}")
+        max_value = pg_cursor.fetchone()[0]
+        
+        # Si la séquence est en retard par rapport à la valeur max, la mettre à jour
+        if seq_value <= max_value:
+            pg_cursor.execute(f"ALTER SEQUENCE {sequence_name} RESTART WITH {max_value + 1}")
+            print(f"Séquence {sequence_name} réinitialisée à {max_value + 1}")
+            
+        return True
+    except Exception as e:
+        print(f"Erreur dans check_and_fix_sequence: {e}")
+        return False
 
 @app.route('/update-in-postgres', methods=['POST'])
 def update_in_postgres():
@@ -1049,6 +1177,47 @@ def transfer_status():
     finally:
         if pg_cursor: pg_cursor.close()
         if pg_conn: pg_conn.close()
-
+@app.route('/fix-all-sequences', methods=['POST'])
+def fix_all_sequences():
+    pg_conn = None
+    pg_cursor = None
+    
+    try:
+        pg_conn = get_postgres_connection()
+        pg_cursor = pg_conn.cursor()
+        
+        # Récupérer toutes les tables
+        pg_cursor.execute("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        """)
+        tables = [table[0] for table in pg_cursor.fetchall()]
+        
+        fixed_tables = []
+        for table in tables:
+            if check_and_fix_sequence(pg_cursor, table):
+                fixed_tables.append(table)
+        
+        pg_conn.commit()
+        
+        return jsonify({
+            "success": True, 
+            "message": f"Séquences corrigées pour {len(fixed_tables)} tables",
+            "fixed_tables": fixed_tables
+        })
+    
+    except Exception as e:
+        if pg_conn:
+            try:
+                pg_conn.rollback()
+            except:
+                pass
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    
+    finally:
+        if pg_cursor: pg_cursor.close()
+        if pg_conn: pg_conn.close()
 if __name__ == '__main__':
     app.run(debug=True)
